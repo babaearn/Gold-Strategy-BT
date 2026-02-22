@@ -311,6 +311,22 @@ ENTRY_START_MINUTE = 0                     # Start minute for entry window (UTC)
 ENTRY_END_HOUR = 8#18 #15                        # End hour for entry window (UTC)
 ENTRY_END_MINUTE = 0#59                      # End minute for entry window (UTC)
 
+# === INTRADAY SESSION EXIT ===
+# When enabled, any open position is force-closed when the session end hour is reached.
+# This complements USE_TIME_RANGE_FILTER which already blocks NEW entries outside hours.
+USE_SESSION_END_EXIT = False               # Force-close positions at session end (useful for intraday/Bybit)
+
+# === AI VOLATILITY REGIME FILTER ===
+# Only enter trades when market volatility is in an expanding regime (ATR > EMA of ATR).
+# This avoids choppy, low-momentum markets where pullback breakouts are less reliable.
+USE_VOLATILITY_REGIME = False              # Enable ATR regime filter (True = only trade expanding volatility)
+ATR_EMA_LOOKBACK = 20                      # EMA period for the ATR regime baseline
+
+# === BYBIT / CRYPTO EXCHANGE SETTINGS ===
+# Set BYBIT_LOT_SIZE > 0 to floor position sizes to exchange lot increments.
+# Leave at 0.0 to use the standard integer-contract sizing (default forex behaviour).
+BYBIT_LOT_SIZE = 0.0                       # Minimum lot increment (e.g. 0.01 for XAUT on Bybit; 0 = disabled)
+
 
 class SunriseOgle(bt.Strategy):
     params = dict(
@@ -429,6 +445,16 @@ class SunriseOgle(bt.Strategy):
         plot_result=True,                 # Enable strategy plotting
         buy_sell_plotdist=0.0005,         # Distance for buy/sell markers on chart
         plot_sltp_lines=True,             # Show stop loss and take profit lines
+
+        # === AI VOLATILITY REGIME FILTER ===
+        use_volatility_regime=USE_VOLATILITY_REGIME,  # Enable ATR regime pre-filter
+        atr_regime_lookback=ATR_EMA_LOOKBACK,          # EMA period for ATR regime baseline
+
+        # === INTRADAY SESSION EXIT ===
+        use_session_end_exit=USE_SESSION_END_EXIT,     # Force-close positions at session end hour
+
+        # === BYBIT / CRYPTO EXCHANGE ===
+        bybit_lot_size=BYBIT_LOT_SIZE,    # Lot size floor (0 = disabled, 0.01 for XAUT Bybit)
     )
 
     def _record_trade_entry(self, signal_direction, dt, entry_price, position_size, current_atr):
@@ -931,6 +957,11 @@ class SunriseOgle(bt.Strategy):
             self.ema_filter_price = bt.ind.EMA(d.close, period=self.p.ema_filter_price_length)
             self.ema_exit = bt.ind.EMA(d.close, period=self.p.ema_exit_length)
             self.atr = bt.ind.ATR(d, period=self.p.atr_length)
+            # Volatility Regime indicator: EMA of ATR (used when use_volatility_regime=True)
+            if self.p.use_volatility_regime and self.p.atr_regime_lookback > 0:
+                self.atr_regime = bt.ind.EMA(self.atr, period=self.p.atr_regime_lookback)
+            else:
+                self.atr_regime = None
 
             # MANUAL ORDER MANAGEMENT - Replace buy_bracket with simple orders
             self.order = None  # Track current pending order
@@ -1143,10 +1174,18 @@ class SunriseOgle(bt.Strategy):
 
     def _phase1_scan_for_signal(self):
         """PHASE 1: Scan for initial EMA crossover signals
-        
+
+        Applies the AI Volatility Regime pre-filter first: if the ATR is below
+        its EMA baseline (contracting volatility / choppy market), no signal is
+        returned regardless of EMA crossover conditions.
+
         Returns:
             str or None: 'LONG' or 'SHORT' if signal detected, None otherwise
         """
+        # AI Volatility Regime pre-filter: skip scanning during contracting volatility
+        if not self._is_volatility_expanding():
+            return None
+
         # Check LONG signals
         if self.p.enable_long_trades:
             # Previous candle bullish check (optional)
@@ -1527,10 +1566,19 @@ class SunriseOgle(bt.Strategy):
         if self.position:
             # Check exit conditions
             bars_since_entry = len(self) - self.last_entry_bar if self.last_entry_bar is not None else 0
-            
+
             # Determine position direction (LONG = positive size, SHORT = negative size)
             position_direction = 'LONG' if self.position.size > 0 else 'SHORT'
-            
+
+            # SESSION END EXIT: Force-close if we are at or past the session end boundary.
+            # Only active when both use_time_range_filter and use_session_end_exit are True.
+            if self.p.use_time_range_filter and self.p.use_session_end_exit:
+                curr_minutes = dt.hour * 60 + dt.minute
+                end_minutes = self.p.entry_end_hour * 60 + self.p.entry_end_minute
+                if curr_minutes >= end_minutes:
+                    self._force_session_exit(dt)
+                    return
+
             # Continue holding - no new entry logic when in position
             return
 
@@ -1780,8 +1828,15 @@ class SunriseOgle(bt.Strategy):
                 if contracts <= 0:
                     self._reset_entry_state()
                     return
-                    
+
                 bt_size = contracts * self.p.contract_size
+
+                # Bybit lot-size flooring: round down to nearest lot increment when enabled
+                if self.p.bybit_lot_size > 0:
+                    bt_size = math.floor(bt_size / self.p.bybit_lot_size) * self.p.bybit_lot_size
+                    if bt_size <= 0:
+                        self._reset_entry_state()
+                        return
 
                 # Place market order based on signal direction
                 if signal_direction == 'LONG':
@@ -2862,6 +2917,53 @@ class SunriseOgle(bt.Strategy):
         # Close trade reporting
         self._close_trade_reporting()
     
+    def _is_volatility_expanding(self):
+        """Return True when ATR is above its EMA baseline (volatility regime expanding).
+
+        Always returns True when use_volatility_regime=False so the filter is a
+        pure no-op when disabled, preserving full backward compatibility.
+        """
+        if not self.p.use_volatility_regime or self.atr_regime is None:
+            return True
+        try:
+            return float(self.atr[0]) > float(self.atr_regime[0])
+        except (IndexError, ValueError, TypeError):
+            return True  # Indicator not warm yet – allow trading
+
+    def _force_session_exit(self, dt):
+        """Cancel all protective orders and place a market close at session end.
+
+        Called when use_session_end_exit=True and the session boundary is reached.
+        Sets pending_close so next() skips further logic until the close fills.
+        """
+        if not self.position:
+            return
+
+        pos_dir = 'LONG' if self.position.size > 0 else 'SHORT'
+        entry_px = self.position.price
+        curr_px = float(self.data.close[0])
+        unrealized = self.position.size * (curr_px - entry_px)
+        print(
+            f"SESSION END EXIT [{dt:%Y-%m-%d %H:%M}]: "
+            f"Closing {pos_dir} | Entry: {entry_px:.2f} | "
+            f"Current: {curr_px:.2f} | Unrealized PnL: {unrealized:+.2f}"
+        )
+
+        # Cancel SL/TP protective orders
+        for attr in ('stop_order', 'limit_order', 'order'):
+            ord_obj = getattr(self, attr, None)
+            if ord_obj is not None:
+                try:
+                    self.cancel(ord_obj)
+                except Exception:
+                    pass
+                setattr(self, attr, None)
+
+        self.close()
+        self.pending_close = True
+        self.last_exit_reason = "SESSION_END"
+        self._reset_entry_state()
+
     def _cancel_all_pending_orders(self):
         """Cancel all pending orders to ensure clean state"""
         try:
