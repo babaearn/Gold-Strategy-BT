@@ -1,0 +1,20 @@
+# ============================================================
+# Railway deployment configuration
+# ============================================================
+# Deploy the XAUT live trading bot as a background worker.
+# All strategy parameters are set via Railway's Variables tab
+# (Settings → Variables) — never commit a real .env file.
+#
+# Required variables (set in Railway dashboard):
+#   BYBIT_API_KEY       — your Bybit API key
+#   BYBIT_API_SECRET    — your Bybit API secret
+#   BYBIT_TESTNET       — true (testnet) or false (mainnet)
+# ============================================================
+
+[build]
+builder = "NIXPACKS"
+
+[deploy]
+startCommand = "python src/live/bot.py"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
