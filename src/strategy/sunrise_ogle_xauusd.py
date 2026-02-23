@@ -327,6 +327,13 @@ ATR_EMA_LOOKBACK = 20                      # EMA period for the ATR regime basel
 # Leave at 0.0 to use the standard integer-contract sizing (default forex behaviour).
 BYBIT_LOT_SIZE = 0.0                       # Minimum lot increment (e.g. 0.01 for XAUT on Bybit; 0 = disabled)
 
+# === CRYPTO POSITION SIZING ===
+# When True, position size is calculated as:
+#   size = (equity * risk_percent) / stop_distance_USD
+# This is the standard crypto approach: no contract multiplier, no lot floors.
+# When False (default), the original forex contract-based sizing is used.
+USE_CRYPTO_SIZING = False
+
 
 class SunriseOgle(bt.Strategy):
     params = dict(
@@ -454,7 +461,12 @@ class SunriseOgle(bt.Strategy):
         use_session_end_exit=USE_SESSION_END_EXIT,     # Force-close positions at session end hour
 
         # === BYBIT / CRYPTO EXCHANGE ===
-        bybit_lot_size=BYBIT_LOT_SIZE,    # Lot size floor (0 = disabled, 0.01 for XAUT Bybit)
+        bybit_lot_size=BYBIT_LOT_SIZE,    # Lot size floor (0 = disabled; kept for legacy)
+
+        # === CRYPTO POSITION SIZING ===
+        # True  → size = (equity × risk_%) / stop_distance_USD  (crypto standard)
+        # False → size = contracts × contract_size              (forex lot standard)
+        use_crypto_sizing=USE_CRYPTO_SIZING,
     )
 
     def _record_trade_entry(self, signal_direction, dt, entry_price, position_size, current_atr):
@@ -1805,38 +1817,40 @@ class SunriseOgle(bt.Strategy):
                 
                 self.initial_stop_level = self.stop_level
 
-                # Position sizing calculation
-                if self.p.enable_risk_sizing:
-                    if signal_direction == 'LONG':
-                        raw_risk = entry_price - self.stop_level
-                    else:  # SHORT
-                        raw_risk = self.stop_level - entry_price
-                        
-                    if raw_risk <= 0:
-                        self._reset_entry_state()
-                        return
-                    equity = self.broker.get_value()
-                    risk_val = equity * self.p.risk_percent
-                    risk_per_contract = raw_risk * self.p.contract_size
-                    if risk_per_contract <= 0:
-                        self._reset_entry_state()
-                        return
-                    contracts = max(int(risk_val / risk_per_contract), 1)
-                else:
-                    contracts = int(self.p.size)
-                
-                if contracts <= 0:
+                # ── Position sizing ─────────────────────────────────────────
+                if signal_direction == 'LONG':
+                    stop_distance = entry_price - self.stop_level
+                else:  # SHORT
+                    stop_distance = self.stop_level - entry_price
+
+                if stop_distance <= 0:
                     self._reset_entry_state()
                     return
 
-                bt_size = contracts * self.p.contract_size
+                if self.p.enable_risk_sizing:
+                    equity    = self.broker.get_value()
+                    risk_val  = equity * self.p.risk_percent
 
-                # Bybit lot-size flooring: round down to nearest lot increment when enabled
-                if self.p.bybit_lot_size > 0:
-                    bt_size = math.floor(bt_size / self.p.bybit_lot_size) * self.p.bybit_lot_size
-                    if bt_size <= 0:
-                        self._reset_entry_state()
-                        return
+                    if self.p.use_crypto_sizing:
+                        # ── CRYPTO / BYBIT SIZING ────────────────────────────
+                        # size (tokens) = risk_amount_USD / stop_distance_USD
+                        # No contract multiplier, no lot floors.
+                        bt_size = risk_val / stop_distance
+                    else:
+                        # ── FOREX / LOT-BASED SIZING ────────────────────────
+                        # size = contracts × contract_size
+                        risk_per_contract = stop_distance * self.p.contract_size
+                        if risk_per_contract <= 0:
+                            self._reset_entry_state()
+                            return
+                        contracts = max(int(risk_val / risk_per_contract), 1)
+                        bt_size   = contracts * self.p.contract_size
+                else:
+                    bt_size = float(self.p.size)
+
+                if bt_size <= 0:
+                    self._reset_entry_state()
+                    return
 
                 # Place market order based on signal direction
                 if signal_direction == 'LONG':

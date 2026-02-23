@@ -85,8 +85,7 @@ QUICK_TEST    = False
 ENABLE_PLOT   = True
 
 # === BYBIT EXCHANGE SPECIFICATIONS ===
-BYBIT_TICK_SIZE = 0.01                        # Minimum price increment
-BYBIT_LOT_SIZE  = 0.01                        # Minimum trade size increment
+BYBIT_TICK_SIZE = 0.01                        # Minimum price increment (informational)
 
 # === TRADING DIRECTION ===
 ENABLE_LONG_TRADES  = True
@@ -120,9 +119,22 @@ class SunriseOgleXAUT(SunriseOgle):
     from SunriseOgle and enables:
       - ATR volatility regime pre-filter
       - Session-end forced position exit
-      - Bybit fractional lot-size position sizing
-    All three features are toggled via params so they can be disabled for
-    A/B testing against the baseline XAUUSD configuration.
+      - Crypto risk-based position sizing (no lots / contract multipliers)
+
+    POSITION SIZING
+    ---------------
+    Uses pure crypto sizing:
+        size (XAUT) = (equity × risk_percent) / stop_distance_USD
+
+    Example with default settings:
+        equity        = $100,000
+        risk_percent  = 1%   → risk_amount = $1,000
+        entry         = $2,500  |  stop_loss = $2,437.50
+        stop_distance = $62.50 (= 2.5 × ATR where ATR ≈ $25)
+        position_size = $1,000 / $62.50  =  16 XAUT tokens
+
+    No lot rounding, no contract multiplier — purely driven by the
+    fixed capital and fixed risk percentage you set at the top of the file.
     """
 
     # Override default params for Bybit XAUT.
@@ -146,10 +158,11 @@ class SunriseOgleXAUT(SunriseOgle):
         long_pullback_max_candles=2,
 
         # --- Risk sizing ---
-        risk_percent=0.01,
+        risk_percent=0.01,           # 1% of account equity per trade
 
-        # --- Contract spec (1 XAUT = 1 oz of Tether Gold) ---
-        contract_size=1,
+        # --- Crypto position sizing (size = risk_amount / stop_distance_USD) ---
+        use_crypto_sizing=True,      # Pure risk-based, no contract multipliers
+        enable_risk_sizing=True,
 
         # --- Trading direction ---
         enable_long_trades=ENABLE_LONG_TRADES,
@@ -166,9 +179,6 @@ class SunriseOgleXAUT(SunriseOgle):
         # --- AI Volatility Regime ---
         use_volatility_regime=USE_VOLATILITY_REGIME,
         atr_regime_lookback=ATR_EMA_LOOKBACK,
-
-        # --- Bybit lot sizing ---
-        bybit_lot_size=BYBIT_LOT_SIZE,
 
         # --- Disable forex position calc (not applicable for Bybit perpetual) ---
         use_forex_position_calc=False,
@@ -262,7 +272,7 @@ if __name__ == '__main__':
     print(f"   Session    : {ENTRY_START_HOUR:02d}:00 – {ENTRY_END_HOUR:02d}:00 UTC")
     print(f"   Vol Regime : {'ENABLED' if USE_VOLATILITY_REGIME else 'DISABLED'} "
           f"(ATR EMA-{ATR_EMA_LOOKBACK})")
-    print(f"   Lot Size   : {BYBIT_LOT_SIZE} XAUT")
+    print(f"   Sizing     : crypto risk-based  (equity × {SunriseOgleXAUT.params.risk_percent:.0%} / stop_dist)")
     print(f"   Direction  : {'LONG+SHORT' if ENABLE_LONG_TRADES and ENABLE_SHORT_TRADES else 'LONG' if ENABLE_LONG_TRADES else 'SHORT'}")
     print()
 
