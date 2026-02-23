@@ -147,7 +147,9 @@ class TelegramNotifier:
     def start(self) -> None:
         t = threading.Thread(target=self._thread_main, daemon=True, name="tg-bot")
         t.start()
-        log.info("Telegram bot started (chat_id=%s)", self._chat_id)
+        # Log a masked chat_id — never print the full ID or token to logs
+        masked = self._chat_id[-4:].rjust(len(self._chat_id), '*')
+        log.info("Telegram bot started (chat_id=%s)", masked)
 
     def _thread_main(self) -> None:
         self._loop = asyncio.new_event_loop()

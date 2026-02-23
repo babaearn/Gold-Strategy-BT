@@ -63,11 +63,43 @@ logging.basicConfig(
 )
 log = logging.getLogger('bot')
 
+# Silence HTTP-client libraries that embed the Telegram bot token in request URLs.
+# Without this, DEBUG logging exposes the token in lines like:
+#   DEBUG httpx - HTTP Request: POST https://api.telegram.org/bot<TOKEN>/getUpdates
+for _lib in ("httpx", "httpcore", "telegram", "apscheduler"):
+    logging.getLogger(_lib).setLevel(logging.WARNING)
+
+
+def _assert_testnet_or_warn() -> None:
+    """
+    Safety guard: refuse to start on MAINNET unless BYBIT_TESTNET is explicitly
+    set to 'false' in the environment.  This prevents accidental live trading
+    caused by a missing or mis-spelled environment variable.
+    """
+    if C.TESTNET:
+        return  # safe — paper trading, no funds at risk
+
+    raw = os.getenv('BYBIT_TESTNET', '').strip().lower()
+    if raw != 'false':
+        # The flag was not explicitly set to false — refuse to start.
+        log.critical(
+            "MAINNET requested but BYBIT_TESTNET env var is not explicitly 'false'. "
+            "Set BYBIT_TESTNET=false to confirm you intend to trade with real funds."
+        )
+        sys.exit(1)
+
+    log.warning("=" * 60)
+    log.warning("  *** MAINNET MODE — REAL FUNDS AT RISK ***")
+    log.warning("  Set BYBIT_TESTNET=true to use paper trading instead.")
+    log.warning("=" * 60)
+
 
 class XAUTBot:
     """Live XAUT/USDT trading bot — one instance per process."""
 
     def __init__(self) -> None:
+        _assert_testnet_or_warn()   # ← safety gate before any exchange calls
+
         log.info("=" * 60)
         log.info("  XAUT Live Bot  |  Bybit %s", 'TESTNET' if C.TESTNET else 'MAINNET')
         log.info("=" * 60)

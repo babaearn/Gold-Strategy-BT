@@ -201,7 +201,7 @@ DATA_FILENAME = 'XAUUSD_5m_5Yea.csv'     # 🥇 Gold (XAU/USD) 5-minute data
 # === BACKTEST SETTINGS ===
 FROMDATE = '2020-07-10'               # Start date for backtesting (YYYY-MM-DD)
 TODATE = '2025-07-25'                 # End date for backtesting (YYYY-MM-DD)
-STARTING_CASH = 100000.0              # Initial account balance in USD
+STARTING_CASH = 500.0                 # Initial account balance in USD
 QUICK_TEST = False                    # True: Reduce to last 10 days for quick testing
 LIMIT_BARS = 0                        # >0: Stop after N bars processed (0 = no limit)
 ENABLE_PLOT = True                    # Show final chart with trades (requires matplotlib)
@@ -2903,7 +2903,7 @@ class SunriseOgle(bt.Strategy):
         
         # Backtrader portfolio value
         final_value = self.broker.get_value()
-        starting_cash = 100000.0  # Known starting value
+        starting_cash = STARTING_CASH  # Use global constant
         total_pnl = final_value - starting_cash
         
         print(f"Trades: {self.trades} Wins: {self.wins} Losses: {self.losses} WinRate: {wr:.2f}% PF: {pf:.2f}")
