@@ -29,3 +29,5 @@ pybit>=5.7.0
 pandas>=1.5.0
 # Load .env file for local development
 python-dotenv>=1.0.0
+# Telegram control panel (commands, PnL, risk control)
+python-telegram-bot>=20.0

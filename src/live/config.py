@@ -93,5 +93,11 @@ ENABLE_SHORT = _bool('ENABLE_SHORT', True)
 # Using 3× the longest period gives a generous buffer.
 WARMUP_BARS = max(EMA_SLOW, ATR_PERIOD, ATR_REGIME_LOOKBACK) * 3
 
+# ── Telegram bot (optional) ───────────────────────────────────────────────────
+# Leave blank to run without Telegram; set both to enable.
+TELEGRAM_TOKEN   = os.getenv('TELEGRAM_TOKEN',   '')
+TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', '')
+TELEGRAM_ENABLED = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
+
 # ── Logging ───────────────────────────────────────────────────────────────────
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO').upper()
