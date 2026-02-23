@@ -142,37 +142,42 @@ class XAUTBot:
 
     # ── startup warmup ────────────────────────────────────────────────────────
 
-    def _warmup(self) -> None:
-        needed = max(C.WARMUP_BARS, 60)
-        log.info("Warming up indicators — fetching %d bars from REST API…", needed)
+    def _fetch_klines(self, limit: int):
+        """
+        Fetch historical klines for indicator warmup.
 
-        http = HTTP(
-            testnet=C.TESTNET,
-            api_key=C.BYBIT_API_KEY,
-            api_secret=C.BYBIT_API_SECRET,
-        )
+        Bybit Testnet blocks US IPs on public endpoints (Railway runs in the US).
+        Strategy: try testnet first, fall back to mainnet public API if blocked.
+        Kline data is identical between testnet and mainnet for XAUTUSDT.
+        Returns the raw list, or None if both attempts fail.
+        """
+        # If running on testnet, try testnet then mainnet; mainnet → mainnet only
+        endpoints = [True, False] if C.TESTNET else [False]
+        for testnet_flag in endpoints:
+            try:
+                # Kline is a public endpoint — no auth headers needed
+                http = HTTP(testnet=testnet_flag)
+                resp = http.get_kline(
+                    category='linear', symbol=C.SYMBOL, interval='5', limit=limit
+                )
+                if testnet_flag != C.TESTNET:
+                    log.info("Warmup: using mainnet market data (testnet blocked from this IP).")
+                return resp['result']['list']
+            except Exception as exc:
+                log.warning(
+                    "Warmup kline fetch failed (testnet=%s): %s — %s",
+                    testnet_flag, type(exc).__name__, exc,
+                )
+        return None
 
-        limit    = min(needed, 200)
-        resp     = http.get_kline(category='linear', symbol=C.SYMBOL, interval='5', limit=limit)
-        raw_bars = resp['result']['list']
-        raw_bars.reverse()   # oldest → newest
+    def _reconcile_position(self) -> None:
+        """Sync bot state with any existing open position on Bybit."""
+        try:
+            pos = self._orders.get_position()
+        except Exception as exc:
+            log.warning("Could not check existing position at startup: %s", exc)
+            return
 
-        for rb in raw_bars:
-            bar = {
-                'timestamp': int(rb[0]),
-                'open':      float(rb[1]),
-                'high':      float(rb[2]),
-                'low':       float(rb[3]),
-                'close':     float(rb[4]),
-                'volume':    float(rb[5]),
-            }
-            self._engine.add_bar(bar)
-            self._bar_index += 1
-
-        log.info("Warmup done: %d bars, indicators warm: %s", self._engine.bar_count, self._engine.is_warm)
-
-        # Reconcile existing position
-        pos = self._orders.get_position()
         if pos:
             self._had_position = True
             self._state.position = {
@@ -187,7 +192,6 @@ class XAUTBot:
                 pos['side'], pos['size'], pos['entry_price'],
                 pos['stop_loss'], pos['take_profit'], pos['unrealised_pnl'],
             )
-            # Restore open trade in log if there's no logged open trade already
             if self._trade_log.get_open() is None:
                 self._trade_log.open_trade(
                     direction=pos['side'],
@@ -198,6 +202,38 @@ class XAUTBot:
                 )
         else:
             log.info("No open position — ready to scan.")
+
+    def _warmup(self) -> None:
+        needed = max(C.WARMUP_BARS, 60)
+        limit  = min(needed, 200)
+        log.info("Warming up indicators — fetching %d bars from REST API…", needed)
+
+        raw_bars = self._fetch_klines(limit)
+
+        if raw_bars is None:
+            log.warning(
+                "Could not fetch warmup data — indicators will warm from live WebSocket feed. "
+                "No trades will be taken for the first ~%d bars (~%.0f min).",
+                needed, needed * 5.0,
+            )
+            self._reconcile_position()
+            return
+
+        raw_bars.reverse()   # oldest → newest
+        for rb in raw_bars:
+            bar = {
+                'timestamp': int(rb[0]),
+                'open':      float(rb[1]),
+                'high':      float(rb[2]),
+                'low':       float(rb[3]),
+                'close':     float(rb[4]),
+                'volume':    float(rb[5]),
+            }
+            self._engine.add_bar(bar)
+            self._bar_index += 1
+
+        log.info("Warmup done: %d bars, indicators warm: %s", self._engine.bar_count, self._engine.is_warm)
+        self._reconcile_position()
 
     # ── helpers ───────────────────────────────────────────────────────────────
 
