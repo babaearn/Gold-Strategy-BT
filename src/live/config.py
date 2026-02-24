@@ -90,6 +90,13 @@ USE_VOLATILITY_REGIME = _bool('USE_VOLATILITY_REGIME', True)
 ENABLE_LONG  = _bool('ENABLE_LONG',  True)
 ENABLE_SHORT = _bool('ENABLE_SHORT', True)
 
+# ── Strategy selection ────────────────────────────────────────────────────────
+# Which strategy to run on startup.
+# Switch at runtime via Telegram /set <n> without restarting the bot.
+#   1 = Volatility Expansion Channel (4-Phase) — default
+#   2 = (add your next strategy and set ACTIVE_STRATEGY=2)
+ACTIVE_STRATEGY = _int('ACTIVE_STRATEGY', 1)
+
 # ── Indicator warmup ──────────────────────────────────────────────────────────
 # Minimum bars needed before any indicator is fully warmed up.
 # Using 3× the longest period gives a generous buffer.

@@ -50,17 +50,19 @@ class BotState:
     Telegram commands write: risk_percent, is_paused, force_close flag.
     """
 
-    def __init__(self, risk_percent: float = 0.01) -> None:
+    def __init__(self, risk_percent: float = 0.01, active_strategy: int = 1) -> None:
         self._lock = threading.Lock()
 
         # Controls — Telegram → trading loop
-        self.risk_percent: float = risk_percent
-        self.is_paused:    bool  = False
-        self._force_close: bool  = False
+        self.risk_percent:    float        = risk_percent
+        self.is_paused:       bool         = False
+        self._force_close:    bool         = False
+        self._strategy_switch: Optional[int] = None   # pending /set request
 
         # Snapshots — trading loop → Telegram
-        self.phase:    str            = "SCANNING"
-        self.position: Optional[dict] = None   # {direction, size, entry, sl, tp}
+        self.phase:           str            = "SCANNING"
+        self.position:        Optional[dict] = None   # {direction, size, entry, sl, tp}
+        self.active_strategy: int            = active_strategy
 
     # ── controls ──────────────────────────────────────────────────────────────
 
@@ -88,15 +90,27 @@ class BotState:
                 return True
             return False
 
+    def request_strategy_switch(self, n: int) -> None:
+        with self._lock:
+            self._strategy_switch = n
+
+    def consume_strategy_switch(self) -> Optional[int]:
+        """Returns the pending strategy number once, then resets."""
+        with self._lock:
+            n = self._strategy_switch
+            self._strategy_switch = None
+            return n
+
     # ── snapshot ──────────────────────────────────────────────────────────────
 
     def snapshot(self) -> dict:
         with self._lock:
             return {
-                "risk_percent": self.risk_percent,
-                "is_paused":    self.is_paused,
-                "phase":        self.phase,
-                "position":     dict(self.position) if self.position else None,
+                "risk_percent":    self.risk_percent,
+                "is_paused":       self.is_paused,
+                "phase":           self.phase,
+                "position":        dict(self.position) if self.position else None,
+                "active_strategy": self.active_strategy,
             }
 
 
@@ -168,6 +182,7 @@ class TelegramNotifier:
             ("pnl_month",   self._cmd_pnl_month),
             ("pnl_overall", self._cmd_pnl_overall),
             ("risk",        self._cmd_risk),
+            ("set",         self._cmd_set),
             ("pause",       self._cmd_pause),
             ("resume",      self._cmd_resume),
             ("close",       self._cmd_close),
@@ -301,6 +316,46 @@ class TelegramNotifier:
         except ValueError:
             await update.message.reply_text("Invalid. Use: /risk 1.5  (must be between 0 and 10)")
 
+    async def _cmd_set(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_owner(update):
+            return await self._deny(update)
+        from strategies import REGISTRY, strategy_name, available_strategies
+        args = ctx.args
+        if not args:
+            lines = "\n".join(
+                f"  {'▶' if n == self.state.active_strategy else ' '} /set {n}  —  {name}"
+                for n, name in available_strategies()
+            )
+            await update.message.reply_text(
+                f"<b>Strategy Selector</b>\n\n"
+                f"Active: #{self.state.active_strategy}\n\n"
+                f"{lines}\n\n"
+                f"Usage: /set 1",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        try:
+            n = int(args[0])
+            if n not in REGISTRY:
+                raise ValueError
+            if n == self.state.active_strategy:
+                await update.message.reply_text(
+                    f"Strategy #{n} is already active."
+                )
+                return
+            self.state.request_strategy_switch(n)
+            await update.message.reply_text(
+                f"Strategy switch to <b>#{n}: {strategy_name(n)}</b> queued.\n"
+                f"Applies on next candle close (only if no open position).",
+                parse_mode=ParseMode.HTML,
+            )
+        except ValueError:
+            available = list(REGISTRY.keys())
+            await update.message.reply_text(
+                f"Invalid strategy number. Available: {available}\n"
+                f"Usage: /set 1"
+            )
+
     async def _cmd_pause(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_owner(update):
             return await self._deny(update)
@@ -336,8 +391,10 @@ class TelegramNotifier:
             return await self._deny(update)
         s = self.state.snapshot()
         import config as C
+        from strategies import strategy_name
         await update.message.reply_text(
             f"<b>Settings</b>\n\n"
+            f"Strategy     : #{s['active_strategy']} — {strategy_name(s['active_strategy'])}\n"
             f"Risk/trade   : {s['risk_percent']*100:.2f}%\n"
             f"Session      : {C.SESSION_START_HOUR:02d}:00–{C.SESSION_END_HOUR:02d}:00 UTC\n"
             f"EMA periods  : {C.EMA_FAST}/{C.EMA_MEDIUM}/{C.EMA_SLOW}\n"
@@ -363,6 +420,7 @@ class TelegramNotifier:
             "/pnl_month       — this month's PnL\n"
             "/pnl_overall     — all-time stats\n"
             "/risk &lt;n&gt;         — set risk % (e.g. /risk 1.5)\n"
+            "/set &lt;n&gt;          — switch strategy (e.g. /set 1 or /set 2)\n"
             "/pause           — stop new entries\n"
             "/resume          — resume entries\n"
             "/close           — force-close position\n"

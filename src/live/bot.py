@@ -51,7 +51,7 @@ from pybit.unified_trading import HTTP, WebSocket
 import config as C
 from indicators import IndicatorEngine
 from order_manager import OrderManager
-from state_machine import StateMachine
+from strategies import get_strategy, strategy_name
 from trade_log import TradeLog
 from telegram_bot import BotState, TelegramNotifier
 
@@ -105,6 +105,7 @@ class XAUTBot:
         log.info("  XAUT Live Bot  |  Bybit %s", _mode)
         log.info("=" * 60)
         log.info("  Symbol     : %s", C.SYMBOL)
+        log.info("  Strategy   : #%d — %s", C.ACTIVE_STRATEGY, strategy_name(C.ACTIVE_STRATEGY))
         log.info("  Session    : %02d:00 – %02d:00 UTC", C.SESSION_START_HOUR, C.SESSION_END_HOUR)
         log.info("  Risk/trade : %.1f%%", C.RISK_PERCENT * 100)
         log.info(
@@ -124,7 +125,7 @@ class XAUTBot:
         self._trade_log = TradeLog()
 
         # ── shared state bridge ───────────────────────────────────────────────
-        self._state = BotState(risk_percent=C.RISK_PERCENT)
+        self._state = BotState(risk_percent=C.RISK_PERCENT, active_strategy=C.ACTIVE_STRATEGY)
 
         # ── Telegram notifier (optional) ──────────────────────────────────────
         if C.TELEGRAM_ENABLED:
@@ -157,8 +158,9 @@ class XAUTBot:
             atr_regime_lookback=C.ATR_REGIME_LOOKBACK,
         )
 
-        # ── state machine ─────────────────────────────────────────────────────
-        self._sm = StateMachine(
+        # ── state machine (strategy selected by ACTIVE_STRATEGY) ─────────────
+        self._sm = get_strategy(
+            C.ACTIVE_STRATEGY,
             long_pullback_max=C.LONG_PULLBACK_MAX,
             short_pullback_max=C.SHORT_PULLBACK_MAX,
             long_window_periods=C.LONG_WINDOW_PERIODS,
@@ -565,6 +567,29 @@ class XAUTBot:
                 f"PnL       : {sign}${closed['pnl_usd']:,.2f}"
             )
 
+    # ── strategy hot-swap ─────────────────────────────────────────────────────
+
+    def _switch_strategy(self, n: int) -> None:
+        """Replace the active state machine with strategy *n*."""
+        try:
+            self._sm = get_strategy(
+                n,
+                long_pullback_max=C.LONG_PULLBACK_MAX,
+                short_pullback_max=C.SHORT_PULLBACK_MAX,
+                long_window_periods=C.LONG_WINDOW_PERIODS,
+                short_window_periods=C.SHORT_WINDOW_PERIODS,
+                window_price_offset=C.WINDOW_PRICE_OFFSET,
+                enable_long=C.ENABLE_LONG,
+                enable_short=C.ENABLE_SHORT,
+            )
+            self._state.active_strategy = n
+            name = strategy_name(n)
+            log.info("Strategy switched to #%d: %s", n, name)
+            self._notify(f"🔄 <b>Strategy #{n} active</b>\n{name}")
+        except ValueError as exc:
+            log.error("Strategy switch failed: %s", exc)
+            self._notify(f"⚠️ Strategy switch failed: {exc}")
+
     # ── WebSocket callback ────────────────────────────────────────────────────
 
     def _on_kline(self, msg: dict) -> None:
@@ -615,7 +640,16 @@ class XAUTBot:
             # Re-read in_position after potential close above
             in_position = (self._state.position is not None) if C.PAPER_MODE else (not self._orders.is_flat())
 
-            # ── 2. Handle /close from Telegram ───────────────────────────────
+            # ── 2. Strategy switch from Telegram /set ─────────────────────────
+            pending_strategy = self._state.consume_strategy_switch()
+            if pending_strategy and not in_position:
+                self._switch_strategy(pending_strategy)
+            elif pending_strategy and in_position:
+                # Requeue — can't switch while a position is open
+                self._state.request_strategy_switch(pending_strategy)
+                log.debug("Strategy switch deferred — position open.")
+
+            # ── 3. Handle /close from Telegram ───────────────────────────────
             if self._state.consume_close_request():
                 if C.PAPER_MODE:
                     if self._state.position:
@@ -625,7 +659,7 @@ class XAUTBot:
                         self._handle_force_close(current_price)
                 return
 
-            # ── 3. Session end: close any open position ───────────────────────
+            # ── 4. Session end: close any open position ───────────────────────
             if self._past_session_end(ts_ms):
                 if C.PAPER_MODE:
                     if self._state.position:
@@ -635,30 +669,30 @@ class XAUTBot:
                         self._session_end_close(dt_str, current_price)
                 return
 
-            # ── 4. Session filter: no new entries outside window ──────────────
+            # ── 5. Session filter: no new entries outside window ──────────────
             if not self._in_session(ts_ms):
                 log.debug("Outside session [%s] — skip.", dt_str)
                 return
 
-            # ── 5. Already in a position: waiting for SL/TP ──────────────────
+            # ── 6. Already in a position: waiting for SL/TP ──────────────────
             if in_position:
                 self._state.phase = self._sm.state
                 log.debug("In position — holding.")
                 return
 
-            # ── 6. Paused via Telegram ────────────────────────────────────────
+            # ── 7. Paused via Telegram ────────────────────────────────────────
             if self._state.is_paused:
                 log.debug("Bot paused — no new entries.")
                 return
 
-            # ── 7. Volatility regime pre-filter ──────────────────────────────
+            # ── 8. Volatility regime pre-filter ──────────────────────────────
             is_vol_expanding = (
                 ind['atr'] > ind['atr_regime'] if C.USE_VOLATILITY_REGIME else True
             )
             if not is_vol_expanding:
                 log.debug("Vol contracting (ATR %.4f < regime %.4f) — skip.", ind['atr'], ind['atr_regime'])
 
-            # ── 8. State machine ──────────────────────────────────────────────
+            # ── 9. State machine ──────────────────────────────────────────────
             signal = self._sm.process_bar(ind, self._bar_index, is_vol_expanding)
             self._state.phase = self._sm.state
             log.debug("SM: state=%s  signal=%s", self._sm.state, signal)
