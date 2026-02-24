@@ -101,7 +101,8 @@ class XAUTBot:
         _assert_testnet_or_warn()   # ← safety gate before any exchange calls
 
         log.info("=" * 60)
-        log.info("  XAUT Live Bot  |  Bybit %s", 'TESTNET' if C.TESTNET else 'MAINNET')
+        _mode = ('TESTNET' if C.TESTNET else 'MAINNET') + (' [PAPER]' if C.PAPER_MODE else '')
+        log.info("  XAUT Live Bot  |  Bybit %s", _mode)
         log.info("=" * 60)
         log.info("  Symbol     : %s", C.SYMBOL)
         log.info("  Session    : %02d:00 – %02d:00 UTC", C.SESSION_START_HOUR, C.SESSION_END_HOUR)
@@ -133,6 +134,7 @@ class XAUTBot:
                 state=self._state,
                 trade_log=self._trade_log,
                 testnet=C.TESTNET,
+                paper_mode=C.PAPER_MODE,
             )
         else:
             self._tg = None
@@ -203,7 +205,28 @@ class XAUTBot:
         return None
 
     def _reconcile_position(self) -> None:
-        """Sync bot state with any existing open position on Bybit."""
+        """Sync bot state with any existing open position."""
+        if C.PAPER_MODE:
+            # In paper mode there is no real position; restore any open paper trade from log
+            open_trade = self._trade_log.get_open()
+            if open_trade:
+                self._had_position = True
+                self._state.position = {
+                    "direction": open_trade['direction'],
+                    "size":      open_trade['size'],
+                    "entry":     open_trade['entry_price'],
+                    "sl":        open_trade['sl'],
+                    "tp":        open_trade['tp'],
+                }
+                log.warning(
+                    "Restored open paper trade from log: %s %.4f XAUT @ %.4f | SL=%.4f TP=%.4f",
+                    open_trade['direction'], open_trade['size'], open_trade['entry_price'],
+                    open_trade['sl'], open_trade['tp'],
+                )
+            else:
+                log.info("No open paper trade — ready to scan.")
+            return
+
         try:
             pos = self._orders.get_position()
         except Exception as exc:
@@ -333,9 +356,33 @@ class XAUTBot:
             return
 
         log.info(
-            "SIGNAL %s  entry≈%.4f  SL=%.4f  TP=%.4f  size=%.4f XAUT",
+            "%s %s  entry≈%.4f  SL=%.4f  TP=%.4f  size=%.4f XAUT",
+            "PAPER" if C.PAPER_MODE else "SIGNAL",
             direction, entry_price, stop_loss, take_profit, size,
         )
+
+        if C.PAPER_MODE:
+            # Virtual position — no real order, track candle-by-candle
+            self._trade_log.open_trade(direction, entry_price, size, stop_loss, take_profit)
+            self._state.position = {
+                "direction": direction,
+                "size":      size,
+                "entry":     entry_price,
+                "sl":        stop_loss,
+                "tp":        take_profit,
+            }
+            self._had_position = True
+            self._sm.reset()
+            emoji = "📊🟢" if direction == "LONG" else "📊🔴"
+            self._notify(
+                f"{emoji} <b>PAPER {direction}</b>\n"
+                f"Size  : {size:.4f} XAUT\n"
+                f"Entry : ${entry_price:,.2f}\n"
+                f"SL    : ${stop_loss:,.2f}\n"
+                f"TP    : ${take_profit:,.2f}\n"
+                f"Risk  : {self._state.risk_percent*100:.2f}%"
+            )
+            return
 
         try:
             self._orders.place_entry(direction, size, stop_loss, take_profit)
@@ -393,6 +440,76 @@ class XAUTBot:
     @staticmethod
     def _sign_char(val: float) -> str:
         return "+" if val >= 0 else ""
+
+    # ── paper-mode exit detection (candle-based SL/TP) ────────────────────────
+
+    def _check_paper_position_closed(self, bar: dict) -> None:
+        """Paper mode: detect if virtual SL or TP was touched by this candle."""
+        pos = self._state.position
+        if not pos:
+            return
+        direction = pos['direction']
+        sl, tp    = pos['sl'], pos['tp']
+        hit = exit_price = None
+        if direction == 'LONG':
+            if bar['low'] <= sl:
+                hit, exit_price = 'SL', sl
+            elif bar['high'] >= tp:
+                hit, exit_price = 'TP', tp
+        else:
+            if bar['high'] >= sl:
+                hit, exit_price = 'SL', sl
+            elif bar['low'] <= tp:
+                hit, exit_price = 'TP', tp
+        if hit is None:
+            return
+        closed = self._trade_log.close_trade(exit_price, reason=f"PAPER_{hit}")
+        self._had_position   = False
+        self._state.position = None
+        self._sm.reset()
+        if closed:
+            sign  = self._sign_char(closed['pnl_usd'])
+            emoji = '🟩' if closed['pnl_usd'] >= 0 else '🟥'
+            self._notify(
+                f"{emoji} <b>PAPER CLOSED ({hit})</b>\n"
+                f"Direction : {closed['direction']}\n"
+                f"Exit      : ${exit_price:,.2f}\n"
+                f"PnL       : {sign}${closed['pnl_usd']:,.2f}"
+            )
+
+    def _session_end_paper_close(self, dt_str: str, current_price: float) -> None:
+        """Paper mode: close virtual position at session end (no exchange call)."""
+        log.info("PAPER SESSION END [%s] — closing virtual position.", dt_str)
+        closed = self._trade_log.close_trade(current_price, reason="SESSION_END")
+        self._had_position   = False
+        self._state.position = None
+        self._sm.reset()
+        if closed:
+            sign = self._sign_char(closed['pnl_usd'])
+            self._notify(
+                f"🕐 <b>PAPER SESSION END — position closed</b>\n"
+                f"Direction : {closed['direction']}\n"
+                f"Exit ~    : ${current_price:,.2f}\n"
+                f"PnL       : {sign}${closed['pnl_usd']:,.2f}"
+            )
+        else:
+            self._notify(f"🕐 Session ended [{dt_str}] — no open paper trade.")
+
+    def _handle_paper_force_close(self, current_price: float) -> None:
+        """Paper mode: manual close from Telegram /close (no exchange call)."""
+        log.info("PAPER force-close requested via Telegram.")
+        closed = self._trade_log.close_trade(current_price, reason="MANUAL_CLOSE")
+        self._had_position   = False
+        self._state.position = None
+        self._sm.reset()
+        if closed:
+            sign = self._sign_char(closed['pnl_usd'])
+            self._notify(
+                f"🛑 <b>PAPER MANUAL CLOSE</b>\n"
+                f"Direction : {closed['direction']}\n"
+                f"Exit ~    : ${current_price:,.2f}\n"
+                f"PnL       : {sign}${closed['pnl_usd']:,.2f}"
+            )
 
     # ── session end close ─────────────────────────────────────────────────────
 
@@ -488,20 +605,34 @@ class XAUTBot:
                 return
 
             current_price = bar['close']
+            in_position   = (self._state.position is not None) if C.PAPER_MODE else (not self._orders.is_flat())
 
-            # ── 1. Detect SL/TP exit (exchange closed position) ───────────────
-            self._check_position_closed(current_price)
+            # ── 1. Detect SL/TP exit ──────────────────────────────────────────
+            if C.PAPER_MODE:
+                self._check_paper_position_closed(bar)
+            else:
+                self._check_position_closed(current_price)
+            # Re-read in_position after potential close above
+            in_position = (self._state.position is not None) if C.PAPER_MODE else (not self._orders.is_flat())
 
             # ── 2. Handle /close from Telegram ───────────────────────────────
             if self._state.consume_close_request():
-                if not self._orders.is_flat():
-                    self._handle_force_close(current_price)
+                if C.PAPER_MODE:
+                    if self._state.position:
+                        self._handle_paper_force_close(current_price)
+                else:
+                    if not self._orders.is_flat():
+                        self._handle_force_close(current_price)
                 return
 
             # ── 3. Session end: close any open position ───────────────────────
             if self._past_session_end(ts_ms):
-                if not self._orders.is_flat():
-                    self._session_end_close(dt_str, current_price)
+                if C.PAPER_MODE:
+                    if self._state.position:
+                        self._session_end_paper_close(dt_str, current_price)
+                else:
+                    if not self._orders.is_flat():
+                        self._session_end_close(dt_str, current_price)
                 return
 
             # ── 4. Session filter: no new entries outside window ──────────────
@@ -509,8 +640,8 @@ class XAUTBot:
                 log.debug("Outside session [%s] — skip.", dt_str)
                 return
 
-            # ── 5. Already in a position: exchange manages SL/TP ─────────────
-            if not self._orders.is_flat():
+            # ── 5. Already in a position: waiting for SL/TP ──────────────────
+            if in_position:
                 self._state.phase = self._sm.state
                 log.debug("In position — holding.")
                 return
@@ -547,8 +678,9 @@ class XAUTBot:
         if self._tg:
             self._tg.start()
             net = "TESTNET" if C.TESTNET else "MAINNET"
+            mode_tag = f" · PAPER" if C.PAPER_MODE else ""
             self._notify(
-                f"🤖 <b>XAUT Bot started [{net}]</b>\n"
+                f"🤖 <b>XAUT Bot started [{net}{mode_tag}]</b>\n"
                 f"Session : {C.SESSION_START_HOUR:02d}:00–{C.SESSION_END_HOUR:02d}:00 UTC\n"
                 f"Risk    : {C.RISK_PERCENT*100:.2f}%\n"
                 f"Use /status for live info."

@@ -119,12 +119,14 @@ class TelegramNotifier:
         state:      BotState,
         trade_log,
         testnet:    bool = True,
+        paper_mode: bool = False,
     ) -> None:
-        self._token    = token
-        self._chat_id  = str(chat_id)
-        self.state     = state
-        self._log      = trade_log
-        self._testnet  = testnet
+        self._token      = token
+        self._chat_id    = str(chat_id)
+        self.state       = state
+        self._log        = trade_log
+        self._testnet    = testnet
+        self._paper_mode = paper_mode
         self._loop:    Optional[asyncio.AbstractEventLoop] = None
         self._app:     Optional[Application]               = None
 
@@ -203,6 +205,7 @@ class TelegramNotifier:
         s    = self.state.snapshot()
         mode = "PAUSED" if s["is_paused"] else "ACTIVE"
         net  = "TESTNET" if self._testnet else "MAINNET"
+        net  = f"{net} · PAPER" if self._paper_mode else net
         await update.message.reply_text(
             f"<b>XAUT Live Bot  [{net}]</b>\n\n"
             f"Status : {mode}\n"
@@ -344,7 +347,8 @@ class TelegramNotifier:
             f"TP L / S     : {C.LONG_ATR_TP_MULT}× / {C.SHORT_ATR_TP_MULT}×ATR\n"
             f"Longs        : {'ON' if C.ENABLE_LONG else 'OFF'}\n"
             f"Shorts       : {'ON' if C.ENABLE_SHORT else 'OFF'}\n"
-            f"Network      : {'TESTNET' if self._testnet else 'MAINNET'}",
+            f"Network      : {'TESTNET' if self._testnet else 'MAINNET'}\n"
+            f"Mode         : {'PAPER (no real orders)' if self._paper_mode else 'LIVE'}",
             parse_mode=ParseMode.HTML,
         )
 
@@ -363,6 +367,7 @@ class TelegramNotifier:
             "/resume          — resume entries\n"
             "/close           — force-close position\n"
             "/settings        — current config\n"
-            "/help            — this message",
+            "/help            — this message"
+            + ("\n\n📡 <b>PAPER MODE</b> — signals tracked, no real orders placed" if self._paper_mode else ""),
             parse_mode=ParseMode.HTML,
         )

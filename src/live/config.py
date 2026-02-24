@@ -48,6 +48,8 @@ BYBIT_API_SECRET = _require('BYBIT_API_SECRET')
 # BYBIT_TESTNET=true  → Bybit Testnet (paper trading, safe to experiment)
 # BYBIT_TESTNET=false → Bybit Mainnet (real money)
 TESTNET = _bool('BYBIT_TESTNET', default=True)
+# PAPER_MODE=true → virtual positions tracked candle-by-candle, no real orders placed
+PAPER_MODE = _bool('PAPER_MODE', default=False)
 
 # ── Instrument ────────────────────────────────────────────────────────────────
 SYMBOL   = os.getenv('SYMBOL', 'XAUTUSDT')
