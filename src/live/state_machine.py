@@ -25,6 +25,7 @@ and the machine resets to SCANNING, exactly as in the backtest strategy.
 from __future__ import annotations
 
 import logging
+from collections import deque
 from dataclasses import dataclass
 
 from indicators import IndicatorEngine
@@ -55,6 +56,8 @@ class StateMachine:
         window_price_offset:  float = 0.001,
         enable_long:          bool  = True,
         enable_short:         bool  = True,
+        trend_filter:         bool  = False,
+        trend_filter_bars:    int   = 15,
     ) -> None:
         self._long_pb_max    = long_pullback_max
         self._short_pb_max   = short_pullback_max
@@ -63,6 +66,10 @@ class StateMachine:
         self._price_offset   = window_price_offset
         self._enable_long    = enable_long
         self._enable_short   = enable_short
+        self._trend_filter      = trend_filter
+        self._trend_filter_bars = trend_filter_bars
+        # Rolling EMA-slow history for trend filter; persists across state resets
+        self._ema_slow_hist: deque = deque(maxlen=trend_filter_bars + 1)
 
         self._reset()
 
@@ -85,6 +92,10 @@ class StateMachine:
 
         Returns 'LONG', 'SHORT', or None.
         """
+        # Track EMA-slow for trend filter (persists across state resets)
+        if self._trend_filter:
+            self._ema_slow_hist.append(ind['ema_slow'])
+
         # Global invalidation must run before the state router
         self._check_global_invalidation(ind)
 
@@ -171,6 +182,9 @@ class StateMachine:
                 self._xabove(ind, 'ema_slow')
             )
             if cross:
+                if self._trend_filter and not self._is_trending('LONG'):
+                    log.debug("PHASE 1: LONG signal rejected — ema_slow not trending up")
+                    return None
                 log.info("PHASE 1: LONG signal → ARMED_LONG")
                 self._state     = 'ARMED_LONG'
                 self._direction = 'LONG'
@@ -184,6 +198,9 @@ class StateMachine:
                 self._xbelow(ind, 'ema_slow')
             )
             if cross:
+                if self._trend_filter and not self._is_trending('SHORT'):
+                    log.debug("PHASE 1: SHORT signal rejected — ema_slow not trending down")
+                    return None
                 log.info("PHASE 1: SHORT signal → ARMED_SHORT")
                 self._state     = 'ARMED_SHORT'
                 self._direction = 'SHORT'
@@ -191,6 +208,20 @@ class StateMachine:
                 return None
 
         return None
+
+    # ── TREND FILTER ──────────────────────────────────────────────────────────
+
+    def _is_trending(self, direction: str) -> bool:
+        """
+        Return True if ema_slow is trending in the signal direction.
+        Requires at least (trend_filter_bars + 1) history entries.
+        """
+        n = self._trend_filter_bars
+        if len(self._ema_slow_hist) < n + 1:
+            return False   # not enough history yet
+        oldest = self._ema_slow_hist[0]    # value n bars ago
+        newest = self._ema_slow_hist[-1]   # current bar
+        return newest > oldest if direction == 'LONG' else newest < oldest
 
     # ── PHASE 2 — count pullback candles ──────────────────────────────────────
 

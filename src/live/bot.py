@@ -168,6 +168,8 @@ class XAUTBot:
             window_price_offset=C.WINDOW_PRICE_OFFSET,
             enable_long=C.ENABLE_LONG,
             enable_short=C.ENABLE_SHORT,
+            trend_filter=C.TREND_FILTER,
+            trend_filter_bars=C.TREND_FILTER_BARS,
         )
 
         self._bar_index:    int  = 0   # monotonic counter for window expiry
@@ -581,6 +583,8 @@ class XAUTBot:
                 window_price_offset=C.WINDOW_PRICE_OFFSET,
                 enable_long=C.ENABLE_LONG,
                 enable_short=C.ENABLE_SHORT,
+                trend_filter=C.TREND_FILTER,
+                trend_filter_bars=C.TREND_FILTER_BARS,
             )
             self._state.active_strategy = n
             name = strategy_name(n)
