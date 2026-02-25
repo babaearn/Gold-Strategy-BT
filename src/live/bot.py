@@ -170,6 +170,9 @@ class XAUTBot:
             enable_short=C.ENABLE_SHORT,
             trend_filter=C.TREND_FILTER,
             trend_filter_bars=C.TREND_FILTER_BARS,
+            orb_range_bars=C.ORB_RANGE_BARS,
+            orb_sl_range_frac=C.ORB_SL_RANGE_FRAC,
+            orb_tp_range_mult=C.ORB_TP_RANGE_MULT,
         )
 
         self._bar_index:    int  = 0   # monotonic counter for window expiry
@@ -347,7 +350,16 @@ class XAUTBot:
         entry_price = ind['close']
         atr         = ind['atr']
 
-        if direction == 'LONG':
+        # Strategy may override SL/TP (e.g. ORB uses range-based levels, not ATR).
+        # If the SM exposes entry_sl / entry_tp, use those; otherwise fall back to
+        # the ATR-multiplier config values.
+        sm_sl = getattr(self._sm, 'entry_sl', None)
+        sm_tp = getattr(self._sm, 'entry_tp', None)
+
+        if sm_sl is not None and sm_tp is not None:
+            stop_loss   = sm_sl
+            take_profit = sm_tp
+        elif direction == 'LONG':
             stop_loss   = ind['low']  - atr * C.LONG_ATR_SL_MULT
             take_profit = ind['high'] + atr * C.LONG_ATR_TP_MULT
         else:
@@ -585,6 +597,9 @@ class XAUTBot:
                 enable_short=C.ENABLE_SHORT,
                 trend_filter=C.TREND_FILTER,
                 trend_filter_bars=C.TREND_FILTER_BARS,
+                orb_range_bars=C.ORB_RANGE_BARS,
+                orb_sl_range_frac=C.ORB_SL_RANGE_FRAC,
+                orb_tp_range_mult=C.ORB_TP_RANGE_MULT,
             )
             self._state.active_strategy = n
             name = strategy_name(n)

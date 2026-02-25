@@ -21,6 +21,7 @@ open position.
 """
 
 from state_machine import StateMachine   # Strategy 1 — 4-Phase Volatility Expansion Channel
+from strategies.orb import ORBStrategy   # Strategy 2 — Opening Range Breakout
 
 # ── Registry ──────────────────────────────────────────────────────────────────
 
@@ -28,13 +29,13 @@ from state_machine import StateMachine   # Strategy 1 — 4-Phase Volatility Exp
 #: Classes must accept the same kwargs as StateMachine.__init__.
 REGISTRY: dict[int, type] = {
     1: StateMachine,
-    # 2: Strategy2,   ← uncomment when strategy_2.py is ready
+    2: ORBStrategy,
 }
 
 #: Human-readable names shown in Telegram messages.
 NAMES: dict[int, str] = {
     1: "Volatility Expansion Channel (4-Phase)",
-    # 2: "Strategy 2 Name",
+    2: "Opening Range Breakout (London Session)",
 }
 
 

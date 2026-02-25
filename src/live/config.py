@@ -99,6 +99,15 @@ ENABLE_SHORT = _bool('ENABLE_SHORT', True)
 TREND_FILTER      = _bool('TREND_FILTER',       default=False)
 TREND_FILTER_BARS = _int( 'TREND_FILTER_BARS',  15)
 
+# ── Strategy 2 — Opening Range Breakout ──────────────────────────────────────
+# Number of 5-min bars used to build the opening range each session.
+# 12 bars = 60 min (13:00–14:00 UTC) — recommended.
+ORB_RANGE_BARS    = _int(  'ORB_RANGE_BARS',    12)
+# SL = (range high - range low) × ORB_SL_RANGE_FRAC below/above entry.
+ORB_SL_RANGE_FRAC = _float('ORB_SL_RANGE_FRAC', 0.7)
+# TP = (range high - range low) × ORB_TP_RANGE_MULT from entry.
+ORB_TP_RANGE_MULT = _float('ORB_TP_RANGE_MULT', 2.0)
+
 # ── Strategy selection ────────────────────────────────────────────────────────
 # Which strategy to run on startup.
 # Switch at runtime via Telegram /set <n> without restarting the bot.

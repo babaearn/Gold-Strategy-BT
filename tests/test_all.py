@@ -1580,6 +1580,239 @@ class TestIntegration(unittest.TestCase):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ORBStrategy
+# ─────────────────────────────────────────────────────────────────────────────
+
+from strategies.orb import ORBStrategy
+
+
+def _make_orb_ind(
+    high:          float = 101.0,
+    low:           float = 98.0,
+    close:         float = 100.0,
+    ema_slow:      float = 100.0,
+    prev_ema_slow: float = 99.0,   # slow rising by default
+) -> dict:
+    """Minimal ind dict for ORBStrategy (only keys it actually reads)."""
+    return {
+        'high':          high,
+        'low':           low,
+        'close':         close,
+        'ema_slow':      ema_slow,
+        'prev_ema_slow': prev_ema_slow,
+    }
+
+
+class TestORBStrategy(unittest.TestCase):
+
+    def _build_sm(self, range_bars=3, sl_frac=0.7, tp_mult=2.0, **kwargs):
+        return ORBStrategy(
+            orb_range_bars=range_bars,
+            orb_sl_range_frac=sl_frac,
+            orb_tp_range_mult=tp_mult,
+            **kwargs,
+        )
+
+    def _arm_sm(self, sm):
+        """Feed sm enough bars (with neutral ind) to reach ARMED state."""
+        ind = _make_orb_ind()
+        for i in range(sm._range_bars):
+            sm.process_bar(ind, bar_index=i, is_vol_expanding=True)
+
+    def test_initial_state_is_range_building(self):
+        sm = self._build_sm()
+        self.assertEqual(sm.state, 'RANGE_BUILDING')
+
+    def test_entry_sl_tp_none_on_init(self):
+        sm = self._build_sm()
+        self.assertIsNone(sm.entry_sl)
+        self.assertIsNone(sm.entry_tp)
+
+    def test_range_builds_until_range_bars_minus_one(self):
+        sm = self._build_sm(range_bars=3)
+        ind = _make_orb_ind()
+        sm.process_bar(ind, bar_index=0, is_vol_expanding=True)
+        self.assertEqual(sm.state, 'RANGE_BUILDING')
+        sm.process_bar(ind, bar_index=1, is_vol_expanding=True)
+        self.assertEqual(sm.state, 'RANGE_BUILDING')
+
+    def test_transitions_to_armed_after_range_bars(self):
+        sm = self._build_sm(range_bars=3)
+        ind = _make_orb_ind()
+        for i in range(3):
+            sm.process_bar(ind, bar_index=i, is_vol_expanding=True)
+        self.assertEqual(sm.state, 'ARMED')
+
+    def test_no_signal_during_range_building(self):
+        sm = self._build_sm(range_bars=3)
+        # Even a high that exceeds any conceivable range should not fire
+        ind = _make_orb_ind(high=9999.0)
+        for i in range(2):
+            result = sm.process_bar(ind, bar_index=i, is_vol_expanding=True)
+            self.assertIsNone(result)
+
+    def test_new_session_gap_resets_range(self):
+        sm = self._build_sm(range_bars=3)
+        self._arm_sm(sm)
+        self.assertEqual(sm.state, 'ARMED')
+        # Gap > 60 bars → new session → back to RANGE_BUILDING
+        ind = _make_orb_ind()
+        sm.process_bar(ind, bar_index=200, is_vol_expanding=True)
+        self.assertEqual(sm.state, 'RANGE_BUILDING')
+
+    def test_small_gap_does_not_reset(self):
+        sm = self._build_sm(range_bars=3)
+        self._arm_sm(sm)
+        self.assertEqual(sm.state, 'ARMED')
+        # Gap <= 60 → same session → stays ARMED
+        ind = _make_orb_ind()
+        sm.process_bar(ind, bar_index=4, is_vol_expanding=True)
+        self.assertEqual(sm.state, 'ARMED')
+
+    def test_long_signal_on_upside_breakout(self):
+        sm = self._build_sm(range_bars=3)
+        # Build range: high=101, low=98 → range_high=101
+        base = _make_orb_ind(high=101.0, low=98.0, close=100.0)
+        for i in range(3):
+            sm.process_bar(base, bar_index=i, is_vol_expanding=True)
+        # Breakout: high=102 > 101, vol expanding, ema_slow rising
+        brk = _make_orb_ind(high=102.0, low=98.0, close=101.5,
+                             ema_slow=100.0, prev_ema_slow=99.0)
+        result = sm.process_bar(brk, bar_index=4, is_vol_expanding=True)
+        self.assertEqual(result, 'LONG')
+
+    def test_short_signal_on_downside_breakout(self):
+        sm = self._build_sm(range_bars=3)
+        base = _make_orb_ind(high=101.0, low=98.0, close=100.0)
+        for i in range(3):
+            sm.process_bar(base, bar_index=i, is_vol_expanding=True)
+        # Breakout: low=97 < 98, vol expanding, ema_slow falling
+        brk = _make_orb_ind(high=100.0, low=97.0, close=98.5,
+                             ema_slow=99.0, prev_ema_slow=100.0)
+        result = sm.process_bar(brk, bar_index=4, is_vol_expanding=True)
+        self.assertEqual(result, 'SHORT')
+
+    def test_vol_filter_blocks_long_entry(self):
+        sm = self._build_sm(range_bars=3)
+        base = _make_orb_ind(high=101.0, low=98.0)
+        for i in range(3):
+            sm.process_bar(base, bar_index=i, is_vol_expanding=True)
+        brk = _make_orb_ind(high=102.0, low=98.0, close=101.5,
+                             ema_slow=100.0, prev_ema_slow=99.0)
+        result = sm.process_bar(brk, bar_index=4, is_vol_expanding=False)
+        self.assertIsNone(result)
+
+    def test_ema_falling_blocks_long(self):
+        """Downtrending ema_slow should block LONG even with upside breakout."""
+        sm = self._build_sm(range_bars=3)
+        base = _make_orb_ind(high=101.0, low=98.0)
+        for i in range(3):
+            sm.process_bar(base, bar_index=i, is_vol_expanding=True)
+        # ema_slow < prev → falling → LONG blocked
+        brk = _make_orb_ind(high=102.0, low=98.0, close=101.5,
+                             ema_slow=99.0, prev_ema_slow=100.0)
+        result = sm.process_bar(brk, bar_index=4, is_vol_expanding=True)
+        self.assertIsNone(result)
+
+    def test_ema_rising_blocks_short(self):
+        """Uptrending ema_slow should block SHORT even with downside breakout."""
+        sm = self._build_sm(range_bars=3)
+        base = _make_orb_ind(high=101.0, low=98.0)
+        for i in range(3):
+            sm.process_bar(base, bar_index=i, is_vol_expanding=True)
+        # ema_slow > prev → rising → SHORT blocked
+        brk = _make_orb_ind(high=101.0, low=97.0, close=98.5,
+                             ema_slow=100.0, prev_ema_slow=99.0)
+        result = sm.process_bar(brk, bar_index=4, is_vol_expanding=True)
+        self.assertIsNone(result)
+
+    def test_entry_sl_tp_correct_on_long(self):
+        """SL = close - range×sl_frac, TP = close + range×tp_mult."""
+        sm = self._build_sm(range_bars=3, sl_frac=0.7, tp_mult=2.0)
+        # range_high=102, range_low=98 → rng=4
+        base = _make_orb_ind(high=102.0, low=98.0, close=100.0)
+        for i in range(3):
+            sm.process_bar(base, bar_index=i, is_vol_expanding=True)
+        brk = _make_orb_ind(high=103.0, low=98.0, close=102.5,
+                             ema_slow=100.0, prev_ema_slow=99.0)
+        sm.process_bar(brk, bar_index=4, is_vol_expanding=True)
+        rng = 4.0
+        self.assertAlmostEqual(sm.entry_sl, 102.5 - rng * 0.7)
+        self.assertAlmostEqual(sm.entry_tp, 102.5 + rng * 2.0)
+
+    def test_entry_sl_tp_correct_on_short(self):
+        """SL = close + range×sl_frac, TP = close - range×tp_mult."""
+        sm = self._build_sm(range_bars=3, sl_frac=0.7, tp_mult=2.0)
+        base = _make_orb_ind(high=102.0, low=98.0, close=100.0)
+        for i in range(3):
+            sm.process_bar(base, bar_index=i, is_vol_expanding=True)
+        brk = _make_orb_ind(high=102.0, low=97.0, close=97.5,
+                             ema_slow=99.0, prev_ema_slow=100.0)
+        sm.process_bar(brk, bar_index=4, is_vol_expanding=True)
+        rng = 4.0
+        self.assertAlmostEqual(sm.entry_sl, 97.5 + rng * 0.7)
+        self.assertAlmostEqual(sm.entry_tp, 97.5 - rng * 2.0)
+
+    def test_done_state_after_signal(self):
+        """After one trade state is DONE; further calls return None."""
+        sm = self._build_sm(range_bars=3)
+        base = _make_orb_ind(high=101.0, low=98.0)
+        for i in range(3):
+            sm.process_bar(base, bar_index=i, is_vol_expanding=True)
+        brk = _make_orb_ind(high=102.0, low=98.0, close=101.5,
+                             ema_slow=100.0, prev_ema_slow=99.0)
+        sm.process_bar(brk, bar_index=4, is_vol_expanding=True)
+        self.assertEqual(sm.state, 'DONE')
+        result = sm.process_bar(brk, bar_index=5, is_vol_expanding=True)
+        self.assertIsNone(result)
+
+    def test_reset_clears_to_range_building(self):
+        sm = self._build_sm(range_bars=3)
+        self._arm_sm(sm)
+        self.assertEqual(sm.state, 'ARMED')
+        sm.reset()
+        self.assertEqual(sm.state, 'RANGE_BUILDING')
+        self.assertIsNone(sm.entry_sl)
+        self.assertIsNone(sm.entry_tp)
+
+    def test_kwargs_absorption(self):
+        """Strategy-1-specific kwargs must not raise."""
+        sm = ORBStrategy(
+            orb_range_bars=12,
+            long_pullback_max=2,
+            short_pullback_max=2,
+            long_window_periods=5,
+            short_window_periods=7,
+            window_price_offset=0.001,
+            trend_filter=False,
+            trend_filter_bars=15,
+            enable_long=True,
+            enable_short=True,
+        )
+        self.assertEqual(sm.state, 'RANGE_BUILDING')
+
+    def test_enable_long_false_suppresses_long(self):
+        sm = self._build_sm(range_bars=3, enable_long=False)
+        base = _make_orb_ind(high=101.0, low=98.0)
+        for i in range(3):
+            sm.process_bar(base, bar_index=i, is_vol_expanding=True)
+        brk = _make_orb_ind(high=102.0, low=98.0, close=101.5,
+                             ema_slow=100.0, prev_ema_slow=99.0)
+        result = sm.process_bar(brk, bar_index=4, is_vol_expanding=True)
+        self.assertIsNone(result)
+
+    def test_enable_short_false_suppresses_short(self):
+        sm = self._build_sm(range_bars=3, enable_short=False)
+        base = _make_orb_ind(high=101.0, low=98.0)
+        for i in range(3):
+            sm.process_bar(base, bar_index=i, is_vol_expanding=True)
+        brk = _make_orb_ind(high=101.0, low=97.0, close=98.5,
+                             ema_slow=99.0, prev_ema_slow=100.0)
+        result = sm.process_bar(brk, bar_index=4, is_vol_expanding=True)
+        self.assertIsNone(result)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
